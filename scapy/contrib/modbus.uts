@@ -263,10 +263,11 @@ str(ModbusPDU2B0EReadDeviceIdentificationRequest()) =='+\x0e\x01\x00'
 
 = ModbusPDU2B0EReadDeviceIdentificationResponse
 str(ModbusPDU2B0EReadDeviceIdentificationResponse()) == '+\x0e\x04\x01\x00\x00\x00'
+= ModbusPDU2B0EReadDeviceIdentificationResponse complete response
+str(ModbusPDU2B0EReadDeviceIdentificationResponse(objCount=2)/ModbusObjectId(id=0, value="Obj1")/ModbusObjectId(id=1, value="Obj2")) == '+\x0e\x04\x01\x00\x00\x02\x00\x04Obj1\x01\x04Obj2'
 = ModbusPDU2B0EReadDeviceIdentificationResponse dissection
 p = ModbusPDU2B0EReadDeviceIdentificationResponse('+\x0e\x01\x83\x00\x00\x03\x00\x08Pymodbus\x01\x02PM\x02\x031.0')
 p.payload.payload.payload.id == 2 and  p.payload.payload.id == 1 and p.payload.id == 0
 
 = ModbusPDU2B0EReadDeviceIdentificationError
 str(ModbusPDU2B0EReadDeviceIdentificationError()) == '\xab\x01'
-

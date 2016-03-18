@@ -572,7 +572,7 @@ class ModbusPDU2B0EReadDeviceIdentificationError(Packet):
 class ModbusObjectId(Packet):
     name = "Object"
     fields_desc = [ByteEnumField("id", 0x00, _read_device_id_object_id),
-                   BitFieldLenField("length", None, 8, count_of="value"),
+                   BitFieldLenField("length", None, 8, length_of="value"),
                    StrLenField("value", "", length_from=lambda pkt: pkt.length)]
 
     def guess_payload_class(self, payload):
