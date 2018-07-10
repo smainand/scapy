@@ -27,12 +27,16 @@ import math
 import struct
 
 # Scapy imports
-from scapy.all import Packet, bind_layers, Ether, UDP, Field, conf
-from scapy.fields import BitEnumField, BitField, ByteField,\
-    FlagsField,\
-    PacketListField,\
-    ShortField, StrFixedLenField,\
-    XBitField, XByteField
+import copy
+from scapy.packet import Packet, bind_layers
+from scapy.layers.l2 import Ether
+from scapy.layers.inet import UDP
+from scapy.fields import (
+    XShortEnumField, BitEnumField, XBitField, BitField, StrField, PacketListField, StrFixedLenField, ShortField,
+    FlagsField, ByteField, XIntField, X3BytesField
+)
+from scapy.error import Scapy_Exception
+from scapy.config import conf
 
 # local imports
 from scapy.contrib.pnio import ProfinetIO
@@ -44,448 +48,241 @@ from scapy.modules.six.moves import range
 #  PROFINET Real-Time Data Packets  #
 #####################################
 
-class PNIORealTimeIOxS(Packet):
-    """IOCS and IOPS packets for PROFINET Real-Time payload"""
-    name = "PNIO RTC IOxS"
+conf.contribs['PNIO_RTC'] = {}
+
+
+class PNIORealTime_IOxS(Packet):
+    '''IOCS and IOPS packets for PROFINET Real-Time payload'''
+    name = 'PNIO RTC IOxS'
     fields_desc = [
-        BitEnumField("dataState", 1, 1, ["bad", "good"]),
-        BitEnumField("instance", 0, 2, ["subslot", "slot", "device", "controller"]),  # noqa: E501
-        XBitField("reserved", 0, 4),
-        BitField("extension", 0, 1),
+        # IOxS.DataState -- IEC-61158 - 6 - 10 / FDIS ED 3, Table 181
+        BitEnumField('dataState', 1, 1, ['bad', 'good']),
+        # IOxS.Instance -- IEC-61158 - 6 - 10 / FDIS ED 3, Table 180
+        BitEnumField('instance', 0, 2, ['subslot', 'slot', 'device', 'controller']),
+        # IOxS.reserved -- IEC-61158 - 6 - 10 / FDIS ED 3, line 2649
+        XBitField('reserved', 0, 4),
+        # IOxS.Extension -- IEC-61158-6-10/FDIS ED 3, Table 179
+        BitField('extension', 0, 1),
     ]
 
-    def extract_padding(self, s):
-        return None, s      # No extra payload
-
-
-class PNIORealTimeRawData(Packet):
-    """Raw data packets for PROFINET Real-Time payload.
-
-    It's a configurable packet whose config only includes a fix length. The
-    config parameter must then be a dict {"length": X}.
-
-    PROFINET IO specification impose this packet to be followed with an IOPS
-    (PNIORealTimeIOxS)"""
-    __slots__ = ["_config"]
-    name = "PNIO RTC Raw data"
-    fields_desc = [
-        StrFixedLenField("load", "", length_from=lambda p: p[PNIORealTimeRawData].length()),  # noqa: E501
-    ]
-
-    def __init__(self, _pkt="", post_transform=None, _internal=0, _underlayer=None, config=None, **fields):  # noqa: E501
-        """
-        length=None means that the length must be managed by the user. If it's
-        defined, the field will always be length-long (padded with b"\\x00" if
-        needed)
-        """
-        self._config = config
-        Packet.__init__(self, _pkt=_pkt, post_transform=post_transform,
-                        _internal=_internal, _underlayer=_underlayer, **fields)
-
-    def copy(self):
-        pkt = Packet.copy(self)
-        pkt._config = self._config
-        return pkt
-
-    def clone_with(self, *args, **kargs):
-        pkt = Packet.clone_with(self, *args, **kargs)
-        pkt._config = self._config
-        return pkt
-
-    def length(self):
-        """Get the length of the raw data"""
-        # Manage the length of the packet if a length is provided
-        return self._config["length"]
-
-
-# Make sure an IOPS follows a data
-bind_layers(PNIORealTimeRawData, PNIORealTimeIOxS)
-
-
-###############################
-#  PROFINET Real-Time Fields  #
-###############################
-
-class LowerLayerBoundPacketListField(PacketListField):
-    """PacketList which binds each underlayer of packets to the current pkt"""
-
-    def m2i(self, pkt, m):
-        return self.cls(m, _underlayer=pkt)
-
-
-class NotionalLenField(Field):
-    """A len fields which isn't present in the machine representation, but is
-    computed from a given lambda"""
-    __slots__ = ["length_from", "count_from"]
-
-    def __init__(self, name, default, length_from=None, count_from=None):
-        Field.__init__(self, name, default)
-        self.length_from = length_from
-        self.count_from = count_from
-
-    def addfield(self, pkt, s, val):
-        return s   # Isn't present in the machine packet
-
-    def getfield(self, pkt, s):
-        val = None
-        if self.length_from is not None:
-            val = self.length_from(pkt, s)
-        elif self.count_from is not None:
-            val = self.count_from(pkt, s)
-        return s, val
-
-
-###############################
-#  PNIORealTime Configuration #
-###############################
-
-# conf.contribs["PNIO_RTC"] is a dict which contains data layout for each Ethernet  # noqa: E501
-# communications. It must be formatted as such:
-# {(Ether.src, Ether.dst): [(start, type, config), ...]}
-# start: index of a data field from the END of the data buffer (-1, -2, ...)
-# type: class to be instantiated to represent these data
-# config: a config dict, given to the type class constructor
-conf.contribs["PNIO_RTC"] = {}
-
-
-def _get_ethernet(pkt):
-    """Find the Ethernet packet of underlayer or None"""
-    ether = pkt
-    while ether is not None and not isinstance(ether, Ether):
-        ether = ether.underlayer
-    return ether
-
-
-def pnio_update_config(config):
-    """Update the PNIO RTC config"""
-    conf.contribs["PNIO_RTC"].update(config)
-
-
-def pnio_get_config(pkt):
-    """Retrieve the config for a given communication"""
-    # get the config based on the tuple (Ether.src, Ether.dst)
-    ether = _get_ethernet(pkt)
-    config = None
-    if ether is not None and (ether.src, ether.dst) in conf.contribs["PNIO_RTC"]:  # noqa: E501
-        config = conf.contribs["PNIO_RTC"][(ether.src, ether.dst)]
-
-    return config
-
-
-###############################
-#  PROFINET Real-Time Packet  #
-###############################
-
-def _pnio_rtc_guess_payload_class(_pkt, _underlayer=None, *args, **kargs):
-    """A dispatcher for the packet list field which manage the configuration
-    to fin the appropriate class"""
-    config = pnio_get_config(_underlayer)
-
-    if isinstance(config, list):
-        # If we have a valid config, it's a list which describe each data
-        # packets the rest being IOCS
-        cur_index = -len(_pkt)
-        for index, cls, params in config:
-            if cur_index == index:
-                return cls(_pkt, config=params, *args, **kargs)
-
-        # Not a data => IOCS packet
-        return PNIORealTimeIOxS(_pkt, *args, **kargs)
-    else:
-        # No config => Raw data which dissect the whole _pkt
-        return PNIORealTimeRawData(_pkt,
-                                   config={"length": len(_pkt)},
-                                   *args, **kargs
-                                   )
-
-
-_PNIO_DS_FLAGS = [
-    "primary",
-    "redundancy",
-    "validData",
-    "reserved_1",
-    "run",
-    "no_problem",
-    "reserved_2",
-    "ignore",
-]
-
-
-class PNIORealTime(Packet):
-    """PROFINET cyclic real-time"""
-    name = "PROFINET Real-Time"
-    fields_desc = [
-        NotionalLenField("len", None, length_from=lambda p, s: len(s)),
-        NotionalLenField("dataLen", None, length_from=lambda p, s: len(s[:-4].rstrip(b"\0"))),  # noqa: E501
-        LowerLayerBoundPacketListField("data", [], _pnio_rtc_guess_payload_class, length_from=lambda p: p.dataLen),  # noqa: E501
-        StrFixedLenField("padding", "", length_from=lambda p: p[PNIORealTime].padding_length()),  # noqa: E501
-        ShortField("cycleCounter", 0),
-        FlagsField("dataStatus", 0x35, 8, _PNIO_DS_FLAGS),
-        ByteField("transferStatus", 0)
-    ]
-    overload_fields = {
-        ProfinetIO: {"frameID": 0x8000},   # RT_CLASS_1
-    }
-
-    def padding_length(self):
-        """Compute the length of the padding need for the ethernet frame"""
-        fld, val = self.getfield_and_val("data")
-
-        # use the len field if available to define the padding length, eg for
-        # dissected packets
-        pkt_len = self.getfieldval("len")
-        if pkt_len is not None:
-            return max(0, pkt_len - len(fld.addfield(self, b"", val)) - 4)
-
-        if isinstance(self.underlayer, ProfinetIO) and \
-                isinstance(self.underlayer.underlayer, UDP):
-            return max(0, 12 - len(fld.addfield(self, b"", val)))
-        else:
-            return max(0, 40 - len(fld.addfield(self, b"", val)))
-
-    @staticmethod
-    def analyse_data(packets):
-        """Analyse the data to find heuristical properties and determine
-        location and type of data"""
-        loc = PNIORealTime.find_data(packets)
-        loc = PNIORealTime.analyse_profisafe(packets, loc)
-        pnio_update_config(loc)
-        return loc
-
-    @staticmethod
-    def find_data(packets):
-        """Analyse a packet list to extract data offsets from packets data."""
-        # a dictionary to count data offsets (ie != 0x80)
-        # It's formatted: {(src, dst): (total, [count for offset in len])}
-        heuristic = {}
-
-        # Counts possible data locations
-        # 0x80 are mainly IOxS and trailing 0x00s are just padding
-        for pkt in packets:
-            if PNIORealTime in pkt:
-                pdu = bytes(pkt[PNIORealTime])[:-4].rstrip(b"\0")
-
-                if (pkt.src, pkt.dst) not in heuristic:
-                    heuristic[(pkt.src, pkt.dst)] = (0, [])
-
-                total, counts = heuristic[(pkt.src, pkt.dst)]
-
-                if len(counts) < len(pdu):
-                    counts.extend([0 for _ in range(len(pdu) - len(counts))])
-
-                for i in range(len(pdu)):
-                    if orb(pdu[i]) != 0x80:
-                        counts[i] += 1
-
-                comm = (pkt.src, pkt.dst)
-                heuristic[comm] = (total + 1, counts)
-
-        # Determine data locations
-        locations = {}
-        for comm in heuristic:
-            total, counts = heuristic[comm]
-            length = len(counts)
-            loc = locations[comm] = []
-            start = None
-            for i in range(length):
-                if counts[i] > total // 2:   # Data if more than half is != 0x80  # noqa: E501
-                    if start is None:
-                        start = i
-                else:
-                    if start is not None:
-                        loc.append((
-                            start - length,
-                            PNIORealTimeRawData,
-                            {"length": i - start}
-                        ))
-                        start = None
-
-        return locations
-
-    @staticmethod
-    def analyse_profisafe(packets, locations=None):
-        """Analyse a packet list to find possible PROFISafe profils.
-
-        It's based on an heuristical analysis of each payload to try to find
-        CRC and control/status byte.
-
-        locations: possible data locations. If not provided, analyse_pn_rt will
-        be called beforehand. If not given, it calls in the same time
-        analyse_data which update the configuration of the data field"""
-        # get data locations and entropy of bytes
-        if not locations:
-            locations = PNIORealTime.find_data(packets)
-        entropies = PNIORealTime.data_entropy(packets, locations)
-
-        # Try to find at least 3 high entropy successive bytes (the CRC)
-        for comm in entropies:
-            entropy = dict(entropies[comm])  # Convert tuples to key => value
-
-            for i in range(len(locations[comm])):
-                # update each location with its value after profisafe analysis
-                locations[comm][i] = \
-                    PNIORealTime.analyse_one_profisafe_location(
-                    locations[comm][i], entropy
-                )
-
-        return locations
-
-    @staticmethod
-    def analyse_one_profisafe_location(location, entropy):
-        """Analyse one PNIO RTC data location to find if its a PROFISafe
-
-        :param location: location to analyse, a tuple (start, type, config)
-        :param entropy: the entropy of each byte of the packet data
-        :returns: the configuration associated with the data
-        """
-        start, klass, conf = location
-        if conf["length"] >= 4:     # Minimal PROFISafe length
-            succ_count = 0
-            for j in range(start, start + conf["length"]):
-                # Limit for a CRC is set to 6 bit of entropy min
-                if j in entropy and entropy[j] >= 6:
-                    succ_count += 1
-                else:
-                    succ_count = 0
-            # PROFISafe profiles must end with at least 3 bytes of high entropy
-            if succ_count >= 3:  # Possible profisafe CRC
-                return (
-                    start,
-                    Profisafe,
-                    {"CRC": succ_count, "length": conf["length"]}
-                )
-        # Not a PROFISafe profile
-        return (start, klass, conf)
-
-    @staticmethod
-    def data_entropy(packets, locations=None):
-        """Analyse a packet list to find the entropy of each data byte
-
-        locations: possible data locations. If not provided, analyse_pn_rt will
-        be called beforehand. If not given, it calls in the same time
-        analyse_data which update the configuration of the data field"""
-        if not locations:
-            locations = PNIORealTime.find_data(packets)
-
-        # Retrieve the entropy of each data byte, for each communication
-        entropies = {}
-        for comm in locations:
-            if len(locations[comm]) > 0:  # Doesn't append empty data
-                entropies[comm] = []
-                comm_packets = []
-
-                # fetch all packets from the communication
-                for pkt in packets:
-                    if PNIORealTime in pkt and (pkt.src, pkt.dst) == comm:
-                        comm_packets.append(
-                            bytes(pkt[PNIORealTime])[:-4].rstrip(b"\0")
-                        )
-
-                # Get the entropy
-                for start, dummy, config in locations[comm]:
-                    for i in range(start, start + config["length"]):
-                        entropies[comm].append(
-                            (i, entropy_of_byte(comm_packets, i))
-                        )
-
-        return entropies
-
-    @staticmethod
-    def draw_entropy(packets, locations=None):
-        """Plot the entropy of each data byte of PN RT communication"""
-        import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
-        entropies = PNIORealTime.data_entropy(packets, locations)
-
-        rows = len(entropies)
-        cur_row = 1
-        for comm in entropies:
-            index = []
-            vals = []
-            for i, ent in entropies[comm]:
-                index.append(i)
-                vals.append(ent)
-
-            # Offsets the indexes to get the index from the beginning
-            offset = -min(index)
-            index = [i + offset for i in index]
-
-            plt.subplot(rows, 1, cur_row)
-            plt.bar(index, vals, 0.8, color="r")
-            plt.xticks([i + 0.4 for i in index], index)
-            plt.title("Entropy from %s to %s" % comm)
-            cur_row += 1
-            plt.ylabel("Shannon Entropy")
-
-        plt.xlabel("Byte offset")   # x label only on the last row
-        plt.legend()
-
-        plt.tight_layout()
-        plt.show()
-
-
-def entropy_of_byte(packets, position):
-    """Compute the entropy of a byte at a given offset"""
-    counter = [0 for _ in range(256)]
-
-    # Count each byte a appearance
-    for pkt in packets:
-        if -position <= len(pkt):     # position must be a negative index
-            counter[orb(pkt[position])] += 1
-
-    # Compute the Shannon entropy
-    entropy = 0
-    length = len(packets)
-    for count in counter:
-        if count > 0:
-            ratio = float(count) / length
-            entropy -= ratio * math.log(ratio, 2)
-
-    return entropy
-
-###############
-#  PROFISafe  #
-###############
-
-
-class XVarBytesField(XByteField):
-    """Variable length bytes field, from 0 to 8 bytes"""
-    __slots__ = ["length_from"]
-
-    def __init__(self, name, default, length=None, length_from=None):
-        self.length_from = length_from
-        if length:
-            self.length_from = lambda p, l=length: l
-        Field.__init__(self, name, default, "!Q")
-
-    def addfield(self, pkt, s, val):
-        length = self.length_from(pkt)
-        return s + struct.pack(self.fmt, self.i2m(pkt, val))[8 - length:]
-
-    def getfield(self, pkt, s):
-        length = self.length_from(pkt)
-        val = struct.unpack(self.fmt, b"\x00" * (8 - length) + s[:length])[0]
-        return s[length:], self.m2i(pkt, val)
-
-
-class Profisafe(PNIORealTimeRawData):
-    """PROFISafe profil to be encapsulated inside the PNRT.data list.
-
-    It's a configurable packet whose config includes a fix length, and a CRC
-    length. The config parameter must then be a dict {"length": X, "CRC": Y}.
-    """
-    name = "PROFISafe"
-    fields_desc = [
-        StrFixedLenField("load", "", length_from=lambda p: p[Profisafe].data_length()),  # noqa: E501
-        XByteField("Control_Status", 0),
-        XVarBytesField("CRC", 0, length_from=lambda p: p[Profisafe].crc_length())  # noqa: E501
-    ]
-
-    def data_length(self):
-        """Return the length of the data"""
-        ret = self.length() - self.crc_length() - 1
+    @classmethod
+    def is_extension_set(cls, _pkt, _lst, p, _remain):
+        ret = cls if isinstance(p, type(None)) or p.extension != 0 else None
         return ret
 
-    def crc_length(self):
-        """Return the length of the crc"""
-        return self._config["CRC"]
+    @classmethod
+    def get_len(cls):
+        return sum([type(fld).i2len(None, 0) for fld in cls.fields_desc])
+
+    def guess_payload_class(self, p):
+        return conf.padding_layer
+
+
+class PNIORealTimeCyclicDefaultRawData(Packet):
+    name = 'PROFINET IO Real Time Cyclic Defaut Raw Data'
+    fields_desc= [
+        # 4 is the sum of the size of the CycleCounter + DataStatus + TransferStatus trailing from PNIORealTimeCyclicPDU
+        StrField('data', '', remain=4)
+    ]
+
+    def guess_payload_class(self, payload):
+        return conf.padding_layer
+
+
+class PNIORealTimeCyclicPDU(Packet):
+    __slots__ = ['_len', '_layout']
+    """PROFINET cyclic real-time"""
+    name = 'PROFINET Real-Time'
+
+    fields_desc = [
+        # C_SDU ^ CSF_SDU -- IEC-61158-6-10/FDIS ED 3, Table 163
+        PacketListField(
+            'data', [], next_cls_cb=lambda pkt, lst, p, remain: pkt.next_cls_cb(lst, p, remain)
+        ),
+        # RTCPadding -- IEC - 61158 - 6 - 10 / FDIS ED 3, Table 163
+        StrFixedLenField('padding', '', length_from=lambda p: p.get_padding_length()),
+        # APDU_Status -- IEC-61158-6-10/FDIS ED 3, Table 164
+        ShortField('cycleCounter', 0),
+        FlagsField('dataStatus', 0x35, 8, [
+            'primary',
+            'redundancy',
+            'validData',
+            'reserved_1',
+            'run',
+            'no_problem',
+            'reserved_2',
+            'ignore',
+        ]),
+        ByteField('transferStatus', 0)
+    ]
+
+    def pre_dissect(self, s):
+        # Constraint from IEC-61158-6-10/FDIS ED 3, line 690
+        self._len = min(1440, len(s))
+        return s
+
+    def get_padding_length(self):
+        if hasattr(self, '_len'):
+            pad_len = (
+                self._len
+                - sum([len(str(pkt)) for pkt in self.getfieldval('data')])
+                - 2  # Cycle Counter size (ShortField)
+                - 1  # DataStatus size (FlagsField over 8 bits)
+                - 1  # TransferStatus (ByteField)
+            )
+        else:
+            pad_len = len(self.getfieldval('padding'))
+
+        # Constraints from IEC-61158-6-10/FDIS ED 3, Table 163
+        assert(0 <= pad_len <= 40)
+        q = self
+        while not isinstance(q, UDP) and hasattr(q, 'underlayer'):
+            q = q.underlayer
+        if isinstance(q, UDP):
+            assert(0 <= pad_len <= 12)
+        return pad_len
+
+    def next_cls_cb(self, _lst, _p, _remain):
+        if hasattr(self, '_layout') and isinstance(self._layout, list):
+            try:
+                return self._layout.pop(0)
+            except IndexError:
+                self._layout = None
+                return None
+
+        ether_layer = None
+        q = self
+        while not isinstance(q, Ether) and hasattr(q, 'underlayer'):
+            q = q.underlayer
+        if isinstance(q, Ether):
+            ether_layer = q
+
+        pnio_layer = None
+        q = self
+        while not isinstance(q, ProfinetIO) and hasattr(q, 'underlayer'):
+            q = q.underlayer
+        if isinstance(q, ProfinetIO):
+            pnio_layer = q
+
+        self._layout = [PNIORealTimeCyclicDefaultRawData]
+        if not isinstance(ether_layer, type(None)) and not isinstance(pnio_layer, type(None)):
+            # Get from config the layout for these hosts and frameid
+            layout = type(self).get_layout_from_config(ether_layer.src, ether_layer.dst, pnio_layer.frameID)
+            if not isinstance(layout, type(None)):
+                self._layout = layout
+
+        return self._layout.pop(0)
+
+    @staticmethod
+    def get_layout_from_config(ether_src, ether_dst, frame_id):
+        try:
+            return copy.deepcopy(conf.contribs['PNIO_RTC'][(ether_src, ether_dst, frame_id)])
+        except KeyError:
+            return None
+
+    @staticmethod
+    def build_fixed_len_raw_type(length):
+        return type(
+            'FixedLenRawPacketLen{}'.format(length),
+            (conf.raw_layer,),
+            {
+                'name': 'FixedLenRawPacketLen{}'.format(length),
+                'fields_desc': [StrFixedLenField('data', '', length=length)],
+                'get_data_length': lambda _: length,
+                'guess_payload_class': lambda self, p: conf.padding_layer,
+            }
+        )
+
+
+# From IEC 61784-3-3 Ed. 3 PROFIsafe v.2.6, Figure 20
+profisafe_control_flags = [
+    'iPar_EN', 'OA_Req', 'R_cons_nr', 'Use_TO2', 'activate_FV', 'Toggle_h', 'ChF_Ack', 'Loopcheck'
+]
+# From IEC 61784-3-3 Ed. 3 PROFIsafe v.2.6, Figure 19
+profisafe_status_flags = [
+    'iPar_OK', 'Device_Fault/ChF_Ack_Req', 'CE_CRC', 'WD_timeout', 'FV_activated', 'Toggle_d', 'cons_nr_R', 'reserved'
+]
+
+class PROFIsafeCRCSeed(Packet):
+    __slots__ = ['_len'] + Packet.__slots__
+
+    def guess_payload_class(self, p):
+        return conf.padding_layer
+
+    def get_data_length(self):
+        raise Scapy_Exception(
+            'You must subclass this class and override this function with the accurate value'
+        )
+
+    def get_mandatory_fields_len(self):
+        # 5 is the len of the control/status byte + the CRC length
+        return 5
+
+    @staticmethod
+    def get_max_data_length():
+        # Constraints from IEC-61784-3-3 ED 3, Figure 18
+        return 13
+
+class PROFIsafeControlCRCSeed(PROFIsafeCRCSeed):
+    name = 'PROFISafe Control Message with F_CRC_Seed=1'
+    fields_desc = [
+        StrFixedLenField('data', '', length_from=lambda p: p.get_data_length()),
+        FlagsField('control', 0, 8, profisafe_control_flags),
+        XIntField('crc', 0)
+    ]
+
+class PROFIsafeStatusCRCSeed(PROFIsafeCRCSeed):
+    name = 'PROFISafe Status Message with F_CRC_Seed=1'
+    fields_desc = [
+        StrFixedLenField('data', '', length_from=lambda p: p.get_data_length()),
+        FlagsField('status', 0, 8, profisafe_status_flags),
+        XIntField('crc', 0)
+    ]
+
+class PROFIsafe(Packet):
+    __slots__ = ['_len'] + Packet.__slots__
+
+    def guess_payload_class(self, p):
+        return conf.padding_layer
+
+    def get_data_length(self):
+        raise Scapy_Exception(
+            'You must subclass this class and override this function with the accurate value'
+        )
+
+    def get_mandatory_fields_len(self):
+        # 4 is the len of the control/status byte + the CRC length
+        return 4
+
+    @staticmethod
+    def get_max_data_length():
+        # Constraints from IEC-61784-3-3 ED 3, Figure 18
+        return 12
+
+    @staticmethod
+    def build_PROFIsafe_class(cls, data_length):
+        assert(cls.get_max_data_length() >= data_length)
+        return type(
+            '{}Len{}'.format(cls.__name__, data_length),
+            (cls,),
+            {
+                'get_data_length': lambda _: data_length,
+            }
+        )
+
+
+class PROFIsafeControl(PROFIsafe):
+    name = 'PROFISafe Control Message with F_CRC_Seed=0'
+    fields_desc = [
+        StrFixedLenField('data', '', length_from=lambda p: p.get_data_length()),
+        FlagsField('control', 0, 8, profisafe_control_flags),
+        X3BytesField('crc', 0)
+    ]
+
+class PROFIsafeStatus(PROFIsafe):
+    name = 'PROFISafe Status Message with F_CRC_Seed=0'
+    fields_desc = [
+        StrFixedLenField('data', '', length_from=lambda p: p.get_data_length()),
+        FlagsField('status', 0, 8, profisafe_status_flags),
+        X3BytesField('crc', 0)
+    ]
