@@ -22,10 +22,18 @@ A simple and non exhaustive Profinet IO layer for scapy
 """
 
 # Scapy imports
-from __future__ import absolute_import
-from scapy.all import Packet, bind_layers, Ether, UDP
-from scapy.fields import XShortEnumField
-from scapy.modules.six.moves import range
+import copy
+from scapy.packet import Packet, bind_layers
+from scapy.layers.l2 import Ether
+from scapy.layers.inet import UDP
+from scapy.fields import (
+    XShortEnumField, BitEnumField, XBitField,
+    BitField, StrField, PacketListField,
+    StrFixedLenField, ShortField,
+    FlagsField, ByteField, XIntField, X3BytesField
+)
+from scapy.error import Scapy_Exception
+from scapy.config import conf
 
 # Some constants
 PNIO_FRAME_IDS = {
@@ -44,37 +52,54 @@ PNIO_FRAME_IDS = {
     0xFF42: "PTCP-DelayFuResPDU",
     0xFF43: "PTCP-DelayResPDU",
 }
-for i in range(0x0100, 0x1000):
-    PNIO_FRAME_IDS[i] = "RT_CLASS_3"
-for i in range(0x8000, 0xC000):
-    PNIO_FRAME_IDS[i] = "RT_CLASS_1"
-for i in range(0xC000, 0xFC00):
-    PNIO_FRAME_IDS[i] = "RT_CLASS_UDP"
-for i in range(0xFF80, 0xFF90):
-    PNIO_FRAME_IDS[i] = "FragmentationFrameID"
+
+
+def i2s_frameid(x):
+    if x in PNIO_FRAME_IDS:
+        return PNIO_FRAME_IDS[x]
+    elif 0x0100 <= x < 0x1000:
+        return "RT_CLASS_3 (%4x)" % x
+    elif 0x8000 <= x < 0xC000:
+        return "RT_CLASS_1 (%4x)" % x
+    elif 0xC000 <= x < 0xFC00:
+        return "RT_CLASS_UDP (%4x)" % x
+    elif 0xFF80 <= x < 0xFF90:
+        return "FragmentationFrameID (%4x)" % x
+    return x
+
+
+def s2i_frameid(x):
+    try:
+        idx = PNIO_FRAME_IDS.values().index(x)
+        return PNIO_FRAME_IDS.keys()[idx]
+    except ValueError:
+        pass
+    if x == "RT_CLASS_3":
+        return 0x0100
+    elif x == "RT_CLASS_1":
+        return 0x8000
+    elif x == "RT_CLASS_UDP":
+        return 0xC000
+    elif x == "FragmentationFrameID":
+        return 0xFF80
+    return x
+
 
 #################
 #  PROFINET IO  #
 #################
 
-
 class ProfinetIO(Packet):
     """Basic PROFINET IO dispatcher"""
-    fields_desc = [XShortEnumField("frameID", 0, PNIO_FRAME_IDS)]
-    overload_fields = {
-        Ether: {"type": 0x8892},
-        UDP: {"dport": 0x8892},
-    }
+    fields_desc = [
+        XShortEnumField("frameID", 0, (i2s_frameid, s2i_frameid))
+    ]
 
     def guess_payload_class(self, payload):
         # For frameID in the RT_CLASS_* range, use the RTC packet as payload
-        if (self.frameID >= 0x0100 and self.frameID < 0x1000) or \
-                (self.frameID >= 0x8000 and self.frameID < 0xFC00):
-            from scapy.contrib.pnio_rtc import PNIORealTime
-            return PNIORealTime
-        else:
-            return Packet.guess_payload_class(self, payload)
-
+        if (0x0100 <= self.frameID < 0x1000) or (0x8000 <= self.frameID < 0xFC00):
+            return PNIORealTimeCyclicPDU
+        return super(ProfinetIO, self).guess_payload_class(payload)
 
 bind_layers(Ether, ProfinetIO, type=0x8892)
 bind_layers(UDP, ProfinetIO, dport=0x8892)
