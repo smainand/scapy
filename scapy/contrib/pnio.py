@@ -1,3 +1,4 @@
+# coding: utf8
 # This file is part of Scapy
 # Scapy is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -33,6 +34,7 @@ from scapy.fields import (
     FlagsField, ByteField, XIntField, X3BytesField
 )
 from scapy.error import Scapy_Exception
+from scapy.compat import raw
 from scapy.config import conf
 
 
@@ -56,6 +58,11 @@ PNIO_FRAME_IDS = {
 
 
 def i2s_frameid(x):
+    """ Get representation name of a pnio frame ID
+
+    :param x: a key of the PNIO_FRAME_IDS dictionary
+    :returns: str
+    """
     if x in PNIO_FRAME_IDS:
         return PNIO_FRAME_IDS[x]
     elif 0x0100 <= x < 0x1000:
@@ -70,9 +77,17 @@ def i2s_frameid(x):
 
 
 def s2i_frameid(x):
+    """ Get pnio frame ID from a representation name
+
+    Performs a reverse look-up in PNIO_FRAME_IDS dictionary
+
+    :param x: a value of PNIO_FRAME_IDS dict
+    :returns: integer
+    """
     try:
-        idx = PNIO_FRAME_IDS.values().index(x)
-        return PNIO_FRAME_IDS.keys()[idx]
+        idx = list(PNIO_FRAME_IDS.values()).index(x)
+        return list(PNIO_FRAME_IDS.keys())[idx]
+
     except ValueError:
         pass
     if x == "RT_CLASS_3":
@@ -187,7 +202,7 @@ class PNIORealTimeCyclicPDU(Packet):
         if hasattr(self, '_len'):
             pad_len = (
                 self._len
-                - sum([len(str(pkt)) for pkt in self.getfieldval('data')])
+                - sum([len(raw(pkt)) for pkt in self.getfieldval('data')])
                 - 2  # Cycle Counter size (ShortField)
                 - 1  # DataStatus size (FlagsField over 8 bits)
                 - 1  # TransferStatus (ByteField)
