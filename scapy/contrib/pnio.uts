@@ -4,9 +4,10 @@
 + Syntax check
 = Import the ProfinetIO layer
 from scapy.contrib.pnio import *
-import scapy.config
+from scapy.config import conf
 import re
-scapy.config.conf.debug_dissector=True
+old_conf_dissector = conf.debug_dissector
+conf.debug_dissector=True
 
 
 + Check DCE/RPC layer
@@ -24,11 +25,11 @@ p.dport == 0x8892
 
 = Ether guesses ProfinetIO as payload class
 p = Ether(hex_bytes('ffffffffffff00000000000088920102'))
-type(p.payload) == ProfinetIO and p.frameID == 0x0102
+isinstance(p.payload, ProfinetIO) and p.frameID == 0x0102
 
 = UDP guesses ProfinetIO as payload class
 p = UDP(hex_bytes('12348892000a00000102'))
-type(p.payload) == ProfinetIO and p.frameID == 0x0102
+isinstance(p.payload, ProfinetIO) and p.frameID == 0x0102
 
 
 + PNIO RTC PDU tests
@@ -223,3 +224,5 @@ assert(raw(p) == b'\x01\x81\x00\x01\x04\x05\x06')
 = PROFIsafe building (response with F_CRC_SEED=1)
 p = PROFIsafe.build_PROFIsafe_class(PROFIsafeStatusCRCSeed, 3)(data = b'\x01\x81\x80', status=0x01, crc=0x04050607)
 assert(raw(p) == b'\x01\x81\x80\x01\x04\x05\x06\x07')
+
+conf.debug_dissector = old_conf_dissector
